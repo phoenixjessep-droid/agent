@@ -35,6 +35,8 @@ from openhands.app_server.sandbox.sandbox_service import (
 from openhands.app_server.sandbox.sandbox_spec_service import SandboxSpecService
 from openhands.app_server.services.injector import InjectorState
 from openhands.app_server.utils.docker_utils import (
+    detect_docker_host_ip,
+    get_bridge_gateway_ip,
     replace_localhost_hostname_for_docker,
 )
 
@@ -56,6 +58,41 @@ def _get_kvm_enabled_default() -> bool:
     """Get the default value for kvm_enabled from environment variables."""
     value = os.getenv('SANDBOX_KVM_ENABLED', '')
     return value.lower() in ('true', '1', 'yes')
+
+
+def _get_default_extra_hosts() -> dict[str, str]:
+    """Get default extra_hosts with bridge IP detection for native Linux Docker.
+
+    On native Linux Docker (without Docker Desktop), the host-gateway DNS alias
+    doesn't resolve automatically. This function detects the actual bridge gateway
+    IP and uses it for extra_hosts configuration.
+
+    The priority is:
+    1. OH_SANDBOX_EXTRA_HOSTS environment variable (JSON format)
+    2. Bridge network gateway IP (detected automatically)
+    3. Fall back to host-gateway
+
+    Returns:
+        Dictionary of hostname to IP mappings for extra_hosts
+    """
+    # Check for explicit environment variable override
+    env_hosts = os.environ.get('OH_SANDBOX_EXTRA_HOSTS')
+    if env_hosts:
+        import json
+        try:
+            return json.loads(env_hosts)
+        except json.JSONDecodeError as e:
+            _logger.warning(f'Invalid OH_SANDBOX_EXTRA_HOSTS JSON: {e}')
+
+    # Try to detect bridge gateway IP
+    bridge_ip = get_bridge_gateway_ip()
+    if bridge_ip:
+        _logger.info(f'Detected bridge gateway IP: {bridge_ip} for extra_hosts')
+        return {'host.docker.internal': bridge_ip}
+
+    # Fall back to host-gateway (works on Docker Desktop)
+    _logger.debug('Using host-gateway for extra_hosts (fallback)')
+    return {'host.docker.internal': 'host-gateway'}
 
 
 class VolumeMount(BaseModel):
@@ -265,6 +302,16 @@ class DockerSandboxService(SandboxService):
                 if started_at < utc_now() - timedelta(
                     seconds=self.startup_grace_seconds
                 ):
+                    # Provide helpful error message for common Linux Docker issues
+                    error_msg = str(exc)
+                    if 'host.docker.internal' in error_msg or 'Name or service not known' in error_msg:
+                        _logger.warning(
+                            f'Sandbox health check failed due to host.docker.internal resolution. '
+                            f'If running on native Linux Docker (without Docker Desktop), '
+                            f'you may need to configure the Docker daemon with hostGatewayIP '
+                            f'or set OH_SANDBOX_EXTRA_HOSTS environment variable. '
+                            f'Error: {exc}'
+                        )
                     _logger.info(
                         f'Sandbox server not running: {app_server_url} : {exc}'
                     )
@@ -620,12 +667,13 @@ class DockerSandboxServiceInjector(SandboxServiceInjector):
         ),
     )
     extra_hosts: dict[str, str] = Field(
-        default_factory=lambda: {'host.docker.internal': 'host-gateway'},
+        default_factory=_get_default_extra_hosts,
         description=(
             'Extra hostname mappings to add to agent-server containers. '
             'This allows containers to resolve hostnames like host.docker.internal '
             'for LAN deployments and MCP connections. '
-            'Format: {"hostname": "ip_or_gateway"}'
+            'Format: {"hostname": "ip_or_gateway"} '
+            'Configure via OH_SANDBOX_EXTRA_HOSTS environment variable.'
         ),
     )
     startup_grace_seconds: int = Field(

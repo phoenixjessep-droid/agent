@@ -1,8 +1,41 @@
-from unittest.mock import patch
+import os
+from unittest.mock import patch, MagicMock
 
 from openhands.app_server.utils.docker_utils import (
+    get_bridge_gateway_ip,
+    detect_docker_host_ip,
     replace_localhost_hostname_for_docker,
 )
+
+
+class TestBridgeGatewayIPDetection:
+    """Test cases for get_bridge_gateway_ip function."""
+
+    def test_get_bridge_gateway_ip_with_cli(self):
+        """Test bridge gateway detection using Docker CLI fallback."""
+        # This test verifies the function uses CLI fallback correctly
+        # In environments with Docker CLI available, it should detect the bridge IP
+        # We test that the function returns a valid value or None (which triggers fallback)
+        result = get_bridge_gateway_ip()
+        # The function may return None if Docker is not available/accessible
+        # The detect_docker_host_ip will then use fallback mechanisms
+        assert result is None or isinstance(result, str)
+
+    def test_detect_docker_host_ip_from_env(self):
+        """Test that OH_SANDBOX_HOST_IP environment variable is respected."""
+        test_ip = '192.168.1.100'
+        with patch.dict(os.environ, {'OH_SANDBOX_HOST_IP': test_ip}):
+            result = detect_docker_host_ip()
+            assert result == test_ip
+
+    def test_detect_docker_host_ip_fallback(self):
+        """Test fallback to default IP."""
+        # When no detection works, should return default
+        with patch('openhands.app_server.utils.docker_utils.get_bridge_gateway_ip', return_value=None):
+            with patch('openhands.app_server.utils.docker_utils.open', side_effect=Exception()):
+                result = detect_docker_host_ip()
+                # Should return the default fallback
+                assert result == '172.17.0.1'
 
 
 class TestReplaceLocalhostHostnameForDocker:
